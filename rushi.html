@@ -1,0 +1,487 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Family Tree — Static Layout (MyHeritage-like)</title>
+<script src="https://d3js.org/d3.v7.min.js"></script>
+<style>
+  body{
+    margin:0;
+    font-family: Arial, Helvetica, sans-serif;
+    background: #f3f4f6;
+    color: #111827;
+  }
+  header{
+    padding:14px 20px;
+    background:#0f172a;
+    color:white;
+  }
+  .controls{
+    padding:12px 20px;
+    background:#fff;
+    display:flex;
+    gap:8px;
+    align-items:center;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.08);
+  }
+  input, select, button {
+    padding:8px 10px;
+    border-radius:6px;
+    border:1px solid #d1d5db;
+    font-size:14px;
+  }
+  button {
+    background:#0ea5a4;
+    color:white;
+    border:none;
+    cursor:pointer;
+    font-weight:600;
+  }
+  #canvasWrap{
+    padding:18px;
+  }
+  svg {
+    border-radius:8px;
+    background: linear-gradient(180deg,#ffffff,#f8fafc);
+    box-shadow: 0 6px 18px rgba(15,23,42,0.06);
+  }
+
+  /* couple box */
+  .couple rect {
+    fill:#0f172a;
+    stroke:#111827;
+    stroke-width:1;
+    rx:8;
+    ry:8;
+  }
+  .couple text {
+    fill: #fff;
+    font-weight:600;
+    font-size:13px;
+  }
+
+  /* single person */
+  .person rect {
+    fill:#fff;
+    stroke:#0f172a;
+    stroke-width:1;
+    rx:8;
+    ry:8;
+  }
+  .person .name {
+    fill:#0f172a;
+    font-weight:600;
+    font-size:13px;
+  }
+
+  /* relation line/label */
+  .link {
+    stroke:#374151;
+    stroke-width:2;
+  }
+  .linkLabel {
+    font-size:12px;
+    fill:#111827;
+    font-weight:600;
+    background: none;
+  }
+
+  /* pending list */
+  .pendingBox {
+    font-size:13px;
+    padding:10px;
+    background:#fff;
+    border-radius:8px;
+    border:1px dashed #cbd5e1;
+  }
+
+  .small { font-size:12px; color:#6b7280; }
+</style>
+</head>
+<body>
+
+<header>
+  <h1 style="margin:0; font-size:18px">Family Tree — Static (MyHeritage-style)</h1>
+  <div class="small">Add members; children appear only after both parents are present.</div>
+</header>
+
+<div class="controls">
+  <input id="newName" placeholder="New person name (unique)" />
+  <select id="relationType">
+    <option value="Father">Father</option>
+    <option value="Mother">Mother</option>
+    <option value="Husband">Husband</option>
+    <option value="Wife">Wife</option>
+    <option value="Child">Child</option>
+  </select>
+
+  <select id="connectTo">
+    <option disabled selected>Select existing member</option>
+  </select>
+
+  <button id="addBtn">Add Person</button>
+
+  <div style="margin-left:auto; display:flex; gap:8px; align-items:center;">
+    <div class="small">Zoom / Pan: mouse wheel / drag</div>
+  </div>
+</div>
+
+<div id="canvasWrap">
+  <svg id="canvas" width="1200" height="700"></svg>
+</div>
+
+<div style="padding:0 20px 24px; display:flex; gap:16px;">
+  <div style="width:320px;">
+    <div class="pendingBox" id="pendingList">
+      <strong>Pending children (waiting for other parent)</strong>
+      <ul id="pendingItems" style="margin-top:8px;"></ul>
+    </div>
+  </div>
+  <div style="flex:1;">
+    <div class="small">Notes: When you add a 'Father' (new person) connected to an existing person, that new person is considered the father of the existing person. When you add 'Child', the new person is considered a child of the selected person — but the child will remain pending until both FATHER & MOTHER relationships exist for that child (you asked to wait for mother).</div>
+  </div>
+</div>
+
+<script>
+/*
+Data model & rules:
+- persons: { id: "Name", x, y }
+- relations array: { source: "Name", target: "Name", type: "FATHER"/"MOTHER"/"MARRIED"/"CHILD"}
+  For 'MARRIED' we'll store type: 'MARRIED'
+- Rendering:
+  - Discover married couples (mutual MARRIED relation or one MARRIED relation) -> render as a 'couple' box.
+  - Children are nodes having incoming parent links: find parent links of type FATHER/MOTHER pointing to child.
+    Child is rendered under parents only when BOTH a FATHER and a MOTHER link exist for that child.
+  - If only one parent exists for a child, keep child in pending list (not shown on canvas).
+*/
+
+// ---------- initial sample data ----------
+let persons = [
+  { id: "Raghav Sharma", x:200, y:80 },
+  { id: "Meera Sharma", x:360, y:80 },
+  { id: "Vikram Singh", x:740, y:80 },
+  { id: "Savita Singh", x:900, y:80 }
+];
+
+let relations = [
+  // Married couples
+  { source: "Raghav Sharma", target: "Meera Sharma", type: "MARRIED" },
+  { source: "Vikram Singh", target: "Savita Singh", type: "MARRIED" },
+
+  // Their children (we'll show them once both parents are connected)
+  { source: "Raghav Sharma", target: "Amit Sharma", type: "FATHER" },
+  { source: "Meera Sharma",  target: "Amit Sharma", type: "MOTHER" },
+
+  { source: "Vikram Singh", target: "Rohan Singh", type: "FATHER" },
+  { source: "Savita Singh",  target: "Rohan Singh", type: "MOTHER" }
+];
+
+// Ensure any persons referenced in relations exist in persons array:
+function ensurePersonExists(name) {
+  if (!persons.find(p => p.id === name)) {
+    // place them off to the right in a grid so new persons don't overlap
+    const baseX = 1000;
+    const baseY = 120;
+    const count = persons.length;
+    const x = baseX + (count % 4) * 160;
+    const y = baseY + Math.floor(count / 4) * 120;
+    persons.push({ id: name, x, y });
+  }
+}
+relations.forEach(r => { ensurePersonExists(r.source); ensurePersonExists(r.target); });
+
+// ---------- D3 setup ----------
+const svg = d3.select("#canvas");
+const width = +svg.attr("width");
+const height = +svg.attr("height");
+
+// zoom container
+const container = svg.append("g");
+svg.call(
+  d3.zoom().scaleExtent([0.2, 2.5]).on("zoom", (event) => {
+    container.attr("transform", event.transform);
+  })
+);
+
+// groups for drawing
+const linksG = container.append("g").attr("class", "links");
+const couplesG = container.append("g").attr("class", "couples");
+const personsG = container.append("g").attr("class", "persons");
+const labelsG = container.append("g").attr("class", "labels");
+
+// helper lookups
+function getPerson(name) { return persons.find(p => p.id === name); }
+function addPersonIfMissing(name) { ensurePersonExists(name); }
+
+// compute couples (group by marriage)
+function computeCouples() {
+  // Find married pairs (we'll treat a single MARRIED relation or two-way as a couple)
+  const marriedLinks = relations.filter(r => r.type === "MARRIED");
+  const coupleMap = new Map();
+  marriedLinks.forEach(l => {
+    const a = l.source, b = l.target;
+    const key = [a,b].sort().join("||");
+    coupleMap.set(key, { a, b });
+  });
+  // Also look for reciprocal entries like Husband/Wife not present; treat them as married if both exist with reverse
+  // (we already normalized to MARRIED on insertion)
+  return Array.from(coupleMap.values());
+}
+
+// find children with both parents
+function findChildrenWithBothParents() {
+  // children are targets that have incoming FATHER and MOTHER
+  const childSet = new Set(relations.map(r => r.target));
+  const result = [];
+  childSet.forEach(child => {
+    const incoming = relations.filter(r => r.target === child && (r.type === "FATHER" || r.type === "MOTHER"));
+    const hasFather = incoming.some(r => r.type === "FATHER");
+    const hasMother = incoming.some(r => r.type === "MOTHER");
+    if (hasFather && hasMother) result.push(child);
+  });
+  return result;
+}
+
+// find pending children (only one parent present)
+function findPendingChildren() {
+  const childSet = new Set(relations.map(r => r.target));
+  const pending = [];
+  childSet.forEach(child => {
+    const incoming = relations.filter(r => r.target === child && (r.type === "FATHER" || r.type === "MOTHER" || r.type === "CHILD"));
+    const hasFather = incoming.some(r => r.type === "FATHER");
+    const hasMother = incoming.some(r => r.type === "MOTHER");
+    // if it's known child with only one or zero of father/mother, and at least one parent link exists, pending
+    if ((hasFather || hasMother) && !(hasFather && hasMother)) pending.push({ name: child, parts: incoming });
+  });
+  return pending;
+}
+
+// layout algorithm: place couples across the top row(s), children centered under their parents
+function layout() {
+  // layout couples left-to-right across the canvas top
+  const couples = computeCouples();
+  const coupleSpacingX = 260;
+  const coupleStartX = 140;
+  let cx = coupleStartX, cy = 80;
+
+  const placed = new Set();
+
+  // position couples
+  couples.forEach((c, i) => {
+    const a = getPerson(c.a), b = getPerson(c.b);
+    if (!a || !b) return;
+    a.x = cx;
+    a.y = cy;
+    b.x = cx + 160;
+    b.y = cy;
+    // mark as placed
+    placed.add(a.id); placed.add(b.id);
+    cx += coupleSpacingX;
+    // wrap row if needed
+    if (cx > width - 200) {
+      cx = coupleStartX;
+      cy += 180;
+    }
+  });
+
+  // position remaining single persons (not in couples)
+  let singleStartX = 80, singleX = singleStartX, singleY = 80 + (couples.length > 0 ? 180 : 0);
+  persons.forEach(p => {
+    if (!placed.has(p.id)) {
+      p.x = singleX;
+      p.y = singleY;
+      singleX += 160;
+      if (singleX > width - 200) {
+        singleX = singleStartX;
+        singleY += 160;
+      }
+    }
+  });
+
+  // position children under their parents if both parents exist and are placed
+  const children = findChildrenWithBothParents();
+  children.forEach(childName => {
+    // find parents
+    const fatherRel = relations.find(r => r.target === childName && r.type === "FATHER");
+    const motherRel = relations.find(r => r.target === childName && r.type === "MOTHER");
+    if (!fatherRel || !motherRel) return; // safety
+    const father = getPerson(fatherRel.source);
+    const mother = getPerson(motherRel.source);
+    const child = getPerson(childName);
+    if (!father || !mother || !child) return;
+
+    // place child under the horizontal center of parents
+    const midX = (father.x + mother.x) / 2;
+    // estimate y = max parent y + offset
+    const parentBottomY = Math.max(father.y, mother.y) + 40;
+    child.x = midX;
+    // ensure children stack vertically (siblings get incremental offset)
+    // collect existing siblings already placed for same parents
+    const siblings = relations
+      .filter(r => ( (r.type==="FATHER" && r.source===father.id) || (r.type==="MOTHER" && r.source===mother.id) ) 
+                     && r.target !== childName)
+      .map(r => r.target);
+
+    // compute how many siblings already placed under same parents
+    // find other children for that couple
+    const coupleChildren = relations
+      .filter(r => (r.type==="FATHER" && r.source===father.id) || (r.type==="MOTHER" && r.source===mother.id))
+      .map(r => r.target)
+      .filter((v,i,arr) => arr.indexOf(v) === i);
+
+    // order children for stable left-right positions
+    const index = coupleChildren.indexOf(childName);
+    const spread = 100;
+    // if only one child, keep centered; for multiple, spread around midX
+    const offsetX = (index - ((coupleChildren.length - 1) / 2)) * spread;
+    child.x = midX + offsetX;
+    child.y = parentBottomY + 100;
+  });
+
+  // For pending children (only one parent) we don't change their positions (they stay where they were created)
+}
+
+// ---------- Rendering ----------
+function render() {
+  // layout first
+  layout();
+
+  // clear groups
+  linksG.selectAll("*").remove();
+  couplesG.selectAll("*").remove();
+  personsG.selectAll("*").remove();
+  labelsG.selectAll("*").remove();
+
+  // compute couples to draw boxes
+  const couples = computeCouples();
+
+  // draw lines (for parent->child or marriages)
+  const visibleChildren = findChildrenWithBothParents(); // only render parent->child links for children who have both parents
+  const visibleLinks = relations.filter(r => {
+    if (r.type === "MARRIED") return true;
+    if ((r.type === "FATHER" || r.type === "MOTHER") && visibleChildren.includes(r.target)) return true;
+    return false; // CHILD links or single-parent links are not rendered to canvas
+  });
+
+  // draw relation lines
+  linksG.selectAll("line")
+    .data(visibleLinks)
+    .enter()
+    .append("line")
+    .attr("class","link")
+    .attr("x1", d=>getPerson(d.source).x + 60) // offset inside box
+    .attr("y1", d=>getPerson(d.source).y + 20)
+    .attr("x2", d=>getPerson(d.target).x + 60)
+    .attr("y2", d=>getPerson(d.target).y + 20)
+    .attr("stroke-linecap","round");
+
+  // draw link labels (at midpoint)
+  labelsG.selectAll("text")
+    .data(visibleLinks)
+    .enter()
+    .append("text")
+    .attr("class","linkLabel")
+    .attr("x", d => (getPerson(d.source).x + getPerson(d.target).x)/2 + 60)
+    .attr("y", d => (getPerson(d.source).y + getPerson(d.target).y)/2 + 8)
+    .text(d => (d.type === "MARRIED" ? "Spouse" : d.type));
+
+  // draw couple boxes
+  couples.forEach((c, idx) => {
+    const a = getPerson(c.a), b = getPerson(c.b);
+    const g = couplesG.append("g").attr("class","couple").attr("transform", `translate(${a.x},${a.y})`);
+    // rectangle covering both persons (width 160 + padding)
+    const boxWidth = Math.abs(b.x - a.x) + 140;
+    const boxHeight = 60;
+    g.append("rect").attr("x",-20).attr("y",-18).attr("width", boxWidth).attr("height", boxHeight);
+    // left name
+    g.append("text").attr("x", 20).attr("y", 6).text(a.id);
+    // right name
+    g.append("text").attr("x", (b.x - a.x) + 20).attr("y", 6).text(b.id);
+  });
+
+  // draw single persons (not in couples)
+  const coupleMemberSet = new Set(couples.flatMap(c => [c.a, c.b]));
+  persons.filter(p => !coupleMemberSet.has(p.id)).forEach(p => {
+    const g = personsG.append("g").attr("class","person").attr("transform", `translate(${p.x},${p.y})`);
+    g.append("rect").attr("x",-20).attr("y",-18).attr("width",120).attr("height",60);
+    g.append("text").attr("class","name").attr("x",40).attr("y",6).attr("text-anchor","middle").text(p.id);
+  });
+
+  updatePendingList();
+}
+
+// ---------- Pending UI ----------
+function updatePendingList() {
+  const pending = findPendingChildren();
+  const ul = document.getElementById("pendingItems");
+  ul.innerHTML = "";
+  pending.forEach(item => {
+    const li = document.createElement("li");
+    const parents = item.parts.map(p => `${p.source} (${p.type})`).join(", ");
+    li.textContent = `${item.name} — known parent(s): ${parents}`;
+    ul.appendChild(li);
+  });
+}
+
+// ---------- UI form population ----------
+function updateConnectToDropdown() {
+  const sel = document.getElementById("connectTo");
+  sel.innerHTML = `<option disabled selected>Select existing member</option>`;
+  persons.forEach(p => {
+    const opt = document.createElement("option");
+    opt.value = p.id;
+    opt.text = p.id;
+    sel.appendChild(opt);
+  });
+}
+
+// ---------- Add person & relation logic ----------
+function addPersonAndRelation(newName, relType, existingName) {
+  // validate unique name
+  if (!newName) { alert("Enter a name"); return; }
+  if (persons.find(p => p.id === newName)) { alert("Name already exists. Use a unique name."); return; }
+  if (!existingName) { alert("Select existing member to connect to."); return; }
+
+  // add new person (place near existing person)
+  const existing = getPerson(existingName);
+  const newX = existing.x + (Math.random()*80 - 40);
+  const newY = existing.y + 140;
+  persons.push({ id: newName, x:newX, y:newY });
+
+  // relation meaning: relation describes new person in relation to existing member
+  // e.g. if relType === "Father", new person is father of existing -> create FATHER link from new -> existing
+  if (relType === "Father") {
+    relations.push({ source: newName, target: existingName, type: "FATHER" });
+  } else if (relType === "Mother") {
+    relations.push({ source: newName, target: existingName, type: "MOTHER" });
+  } else if (relType === "Husband" || relType === "Wife") {
+    // create MARRIED relation normalized
+    relations.push({ source: newName, target: existingName, type: "MARRIED" });
+    // Also add reverse to make couple detection robust (optional)
+    relations.push({ source: existingName, target: newName, type: "MARRIED" });
+  } else if (relType === "Child") {
+    // new person is child of existing -> create generic CHILD link (we will not count it as full parent)
+    // We'll store as PARENT-like link from existing -> new, but not of type FATHER/MOTHER.
+    relations.push({ source: existingName, target: newName, type: "CHILD" });
+  }
+
+  updateConnectToDropdown();
+  render();
+}
+
+// ---------- wire up UI ----------
+document.getElementById("addBtn").addEventListener("click", () => {
+  const name = document.getElementById("newName").value.trim();
+  const rel = document.getElementById("relationType").value;
+  const to = document.getElementById("connectTo").value;
+  addPersonAndRelation(name, rel, to);
+  document.getElementById("newName").value = "";
+});
+
+// initial population
+updateConnectToDropdown();
+render();
+
+</script>
+</body>
+</html>
