@@ -12,4 +12,17 @@ import { FormsModule } from '@angular/forms';
 export class LoginComponent {
   username = "";
   password = ""
+  errormsg = "";
+
+  login(){
+    if(this.username.trim().length === 0){
+      this.errormsg = "Username is required";
+    }
+    else if(this.password.trim().length === 0){
+      this.errormsg = "Password is required";
+    }
+    else{
+      this.errormsg = "";
+    }
+  }
 }

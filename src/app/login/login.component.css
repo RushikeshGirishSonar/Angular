@@ -50,11 +50,18 @@
   }
 
   .btn-container{
+    position: relative;
     .btn{
         width: 100%;
         margin-top: 20px;
         border: none;
     }
 
+    .error{
+        color: red;
+        top: 55px;
+        position: absolute;
+        right: 0px;
+    }
   }
 }

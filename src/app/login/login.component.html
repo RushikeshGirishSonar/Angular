@@ -34,7 +34,8 @@
         </div>
 
         <div class="btn-container">
-            <button class="btn btn-dark">Login</button>
+            <div class="error">{{ errormsg }}</div>
+            <button class="btn btn-dark" (click)="login()">Login</button>
         </div>
     </div>
 
